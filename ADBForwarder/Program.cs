@@ -14,7 +14,7 @@ namespace ADBForwarder
 {
     internal class Program
     {
-        public const string VERSION = "0.2";
+        public const string VERSION = "1.0.2";
         
         private static readonly string[] deviceNames =
         {
@@ -33,6 +33,8 @@ namespace ADBForwarder
 
         private static void Main()
         {
+            Console.WriteLine("ADBForwarder v" + VERSION);
+
             Console.ResetColor();
             var currentDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             if (currentDirectory == null)
@@ -83,7 +85,7 @@ namespace ADBForwarder
             var monitor = new DeviceMonitor(new AdbSocket(endPoint));
             monitor.DeviceConnected += Monitor_DeviceConnected;
             monitor.DeviceDisconnected += Monitor_DeviceDisconnected;
-            monitor.Start();
+            monitor.Start();        
 
             while (true)
             {
