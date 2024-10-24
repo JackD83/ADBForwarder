@@ -9,30 +9,24 @@ using System.Runtime.InteropServices;
 
 using SharpAdbClient;
 using ICSharpCode.SharpZipLib.Zip;
+using SharpAdbClient.DeviceCommands;
 
 namespace ADBForwarder
 {
     internal class Program
     {
         public const string VERSION = "0.2";
-        
-        private static readonly string[] deviceNames =
-        {
-            "monterey",        // Oculus Quest 1
-            "hollywood",       // Oculus Quest 2
-            "pacific",         // Oculus Go
-            "vr_monterey",     // Edge case for linux, Quest 1
-            "vr_hollywood",    // Edge case for linux, Oculus Quest 2
-            "vr_pacific",      // Edge case for linux, Oculus Go
-            "Phoenix_ovs"      //Pico4
-        };
-        
+
+        private static string[] deviceNames = new string[0];
+
         private static readonly AdbClient client = new AdbClient();
         private static readonly AdbServer server = new AdbServer();
         private static readonly IPEndPoint endPoint = new IPEndPoint(IPAddress.Loopback, AdbClient.AdbServerPort);
 
         private static void Main()
         {
+            readDeviceNames();
+
             Console.ResetColor();
             var currentDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             if (currentDirectory == null)
@@ -41,21 +35,21 @@ namespace ADBForwarder
                 Console.WriteLine("Path error!");
                 return;
             }
-            
+
             var adbPath = "adb/platform-tools/{0}";
             var downloadUri = "https://dl.google.com/android/repository/platform-tools-latest-{0}.zip";
-            
+
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
                 Console.WriteLine("Platform: Linux");
-                
+
                 adbPath = string.Format(adbPath, "adb");
                 downloadUri = string.Format(downloadUri, "linux");
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 Console.WriteLine("Platform: Windows");
-                
+
                 adbPath = string.Format(adbPath, "adb.exe");
                 downloadUri = string.Format(downloadUri, "windows");
             }
@@ -70,7 +64,7 @@ namespace ADBForwarder
             {
                 Console.WriteLine("ADB not found, downloading in the background...");
                 DownloadADB(downloadUri);
-                
+
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                     SetExecutable(absoluteAdbPath);
             }
@@ -79,7 +73,7 @@ namespace ADBForwarder
             server.StartServer(absoluteAdbPath, false);
 
             client.Connect(endPoint);
-            
+
             var monitor = new DeviceMonitor(new AdbSocket(endPoint));
             monitor.DeviceConnected += Monitor_DeviceConnected;
             monitor.DeviceDisconnected += Monitor_DeviceDisconnected;
@@ -104,7 +98,25 @@ namespace ADBForwarder
             Console.ForegroundColor = ConsoleColor.DarkRed;
             Console.WriteLine($"Disconnected device: {e.Device.Serial}");
         }
-        
+
+        private static void readDeviceNames()
+        {
+            string filePath = "devices.conf";
+
+            if (!File.Exists(filePath))
+            {
+                Console.ForegroundColor = ConsoleColor.DarkRed;
+                Console.WriteLine("devices.conf not found");
+                return;
+            }
+
+
+            deviceNames = File.ReadAllLines(filePath)
+                                       .Where(line => !line.Trim().StartsWith("//") && !string.IsNullOrWhiteSpace(line))
+                                       .Select(line => line.Split(new[] { "//" }, StringSplitOptions.None)[0].Trim())
+                                       .ToArray();
+        }
+
         private static void Forward(DeviceData device)
         {
             // DeviceConnected calls without product set yet
@@ -112,6 +124,8 @@ namespace ADBForwarder
 
             foreach (var deviceData in client.GetDevices().Where(deviceData => device.Serial == deviceData.Serial))
             {
+
+
                 if (!deviceNames.Contains(deviceData.Product))
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
@@ -119,26 +133,87 @@ namespace ADBForwarder
                     return;
                 }
 
+                var receiver = new ConsoleOutputReceiver();
+
+
+                if (File.Exists("../alvr_client_android.apk"))
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("Trying to install latest ALVR Client");
+
+                    try
+                    {
+                        client.ExecuteShellCommand(deviceData, "am force-stop alvr.client", receiver);
+                        client.ExecuteShellCommand(deviceData, "pm clear alvr.client", receiver);
+                    }
+
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("Failed clear ALVR Client state");
+                        return;
+                    }
+
+
+                    try
+                    {
+                        PackageManager manager = new PackageManager(client, deviceData);
+                        manager.InstallPackage(@"alvr_client_android.apk", reinstall: true);
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("Successfully Updated ALVR Client");
+
+                        client.ExecuteShellCommand(deviceData, " pm grant alvr.client android.permission.RECORD_AUDIO", receiver);
+
+
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("Failed to install ALVR Client");
+                        return;
+                    }
+                }
+
+
                 client.CreateForward(deviceData, 9943, 9943);
                 client.CreateForward(deviceData, 9944, 9944);
 
+
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine($"Successfully forwarded device: {deviceData.Serial} [{deviceData.Product}]");
-                    
+
+                try
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    client.ExecuteShellCommand(deviceData, "monkey -p 'alvr.client' 1", receiver);
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Failed to run ALVR Client");
+                    return;
+                }
+
+
+                Console.ForegroundColor = ConsoleColor.Blue;
+                Console.WriteLine($"USB Streaming to device {deviceData.Serial} ready!");
+
                 return;
             }
+
+           
         }
-        
+
         private static void DownloadADB(string downloadUri)
         {
             using var web = new WebClient();
             web.DownloadFile(downloadUri, "adb.zip");
             Console.WriteLine("Download successful");
-            
+
             var zip = new FastZip();
             zip.ExtractZip("adb.zip", "adb", null);
             Console.WriteLine("Extraction successful");
-            
+
             File.Delete("adb.zip");
         }
 
@@ -148,7 +223,7 @@ namespace ADBForwarder
 
             var args = $"chmod u+x {fileName}";
             var escapedArgs = args.Replace("\"", "\\\"");
-        
+
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
